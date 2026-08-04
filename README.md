@@ -53,7 +53,7 @@ those are set, chat requests fail with a clear error; captures still work.
 
 ## Manual testing
 
-[`../tuti-tui`](../tuti-tui) is a terminal client for poking at a running
+[`tuti-tui`](tuti-tui) is a terminal client for poking at a running
 server by hand — chat, capture upload/attach, health checks — without
 reaching for `curl`. Run it alongside this server with `make run` from that
 folder.
