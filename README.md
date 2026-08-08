@@ -1,14 +1,24 @@
 # tuti-server
 
-Go backend for the Tuti math tutor app. Provides:
+Go backend for the Tuti math tutor app: an HTTP/JSON binding of the
+`TutiService` RPCs defined in
+[`tuti/proto/tuti_service.proto`](../tuti/proto/tuti_service.proto) — the
+**source of truth** for the API contract, owned by the client repo. This
+server implements it; it doesn't define it. See that file for the
+authoritative message/RPC shapes.
 
-- `POST /v1/chat` — send a message (with optional prior history and an
-  optional attached capture) to the tutoring agent; streams the reply back
-  as raw text chunks over a chunked HTTP response.
-- `POST /v1/captures` — upload a screenshot (`multipart/form-data`, field
-  `file`).
-- `GET /v1/captures` — list uploaded captures, most recent first.
-- `GET /v1/captures/{id}/content` — fetch a capture's raw bytes.
+Routes (all `POST`, protojson request/response bodies — see
+[Wire format](#wire-format) below):
+
+- `POST /v1/InitializeSnapAndSolve` — start a Snap & Solve session.
+- `POST /v1/SubmitSnap` — upload the captured photo for a session.
+- `POST /v1/SubmitSnapResponse` — submit the student's chosen action
+  (`check_work` / `solve` / `explain`); returns the analysis.
+- `POST /v1/UploadScreenshot` — upload a screenshot.
+- `POST /v1/ListCaptures` — list uploaded captures, most recent first.
+- `POST /v1/CreateSession` — open a solve session.
+- `POST /v1/AnalyzeAssets` — analyze captures attached to a session.
+- `POST /v1/GetLessonContent` — fetch lesson content by id + language.
 - `GET /healthz`
 
 No authentication yet — every route is open. See `internal/httpapi/server.go`
@@ -16,14 +26,14 @@ for where an auth middleware should be added later.
 
 ## Design
 
-Three seams are abstracted behind interfaces so the concrete backend can be
-swapped without touching HTTP handlers:
-
-| Interface                    | Default implementation                          |
-| ----------------------------- | ------------------------------------------------ |
-| `internal/agent.Agent`        | `internal/agent/claude` — streams from the Claude API |
-| `internal/storage.Store`      | `internal/storage/localfs` — local disk, in-memory index |
-| `internal/tracing.Tracer`     | `internal/tracing/slogtracer` — structured logs via `log/slog` |
+| Package                  | Role                                                                 |
+| ------------------------- | --------------------------------------------------------------------- |
+| `internal/genproto/tutiv1` | Generated Go types from the proto — see [Regenerating](#regenerating-the-proto-bindings) |
+| `internal/catalog`        | Static content: lessons, practice problems, topic recommendations, snap options. Ported from the Flutter app's `MockTutiServerClient`. |
+| `internal/analysis`       | The one place a photo is actually sent to Claude: classifying blank-vs-written and extracting/evaluating a problem (forced tool-use, not free text). Everything else (similar problems, lessons to review) is resolved deterministically from `internal/catalog`. |
+| `internal/session`        | In-memory state for the Snap & Solve step flow and solve sessions. |
+| `internal/storage`        | `Store` interface + `internal/storage/localfs` — local disk, in-memory index, for captures. |
+| `internal/tracing`        | `Tracer` interface + `internal/tracing/slogtracer` — structured logs via `log/slog`. |
 
 To swap storage for S3/GCS or tracing for OpenTelemetry, implement the
 respective interface and wire it in `cmd/server/main.go` — nothing else
@@ -32,7 +42,7 @@ changes.
 ## Running
 
 ```sh
-cp .env.example .env   # then fill in ANTHROPIC_API_KEY
+cp .env.example .env   # then fill in OPENAI_API_KEY (or switch to Anthropic, see below)
 make run                # or: ./run.sh
 ```
 
@@ -42,33 +52,73 @@ wrapper around it; other useful targets:
 
 ```sh
 make build   # compile to bin/server
+make proto   # regenerate internal/genproto from ../tuti/proto
 make test    # go test ./...
 make tidy    # go mod tidy
 make fmt     # gofmt -l -w .
 ```
 
-Credentials resolve the same way as every Anthropic SDK: `ANTHROPIC_API_KEY`,
-then `ANTHROPIC_AUTH_TOKEN`, then an `ant auth login` profile. If none of
-those are set, chat requests fail with a clear error; captures still work.
+`internal/analysis` supports two backends, selected by `ANALYSIS_BACKEND`
+(`openai`, the default, or `anthropic`) — see `internal/analysis/provider.go`
+for the interface if you want to add a third. `ANALYSIS_MODEL` picks the
+model for whichever backend is active (defaults: `gpt-5.2` /
+`claude-opus-5`). Credentials resolve the same way as the respective vendor
+SDK: for OpenAI, `OPENAI_API_KEY`; for Anthropic, `ANTHROPIC_API_KEY`, then
+`ANTHROPIC_AUTH_TOKEN`, then an `ant auth login` profile. The server logs
+which backend/model it resolved and whether a key was found for it at
+startup — check those logs first if analysis calls are failing. If no
+credentials are set, `SubmitSnapResponse`/`AnalyzeAssets` fail once they
+actually call the model; everything else (captures, lessons, session
+bookkeeping) still works.
+
+## Regenerating the proto bindings
+
+The `.proto` lives in the client repo, `tuti/proto/tuti_service.proto` —
+edit it there. This repo only generates Go bindings from it:
+
+```sh
+make proto   # or: ./scripts/gen_proto.sh
+```
+
+Requires `tuti-server` checked out next to `tuti` (`../tuti` from this
+repo's root), plus `buf` and `protoc-gen-go` on `PATH`:
+
+```sh
+go install github.com/bufbuild/buf/cmd/buf@latest
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+```
+
+Generated output lands in `internal/genproto/tutiv1/` and is committed, so
+building this repo doesn't require `buf` unless the proto actually changed.
 
 ## Manual testing
 
-[`tuti-tui`](tuti-tui) is a terminal client for poking at a running
-server by hand — chat, capture upload/attach, health checks — without
-reaching for `curl`. Run it alongside this server with `make run` from that
-folder.
+[`tuti-tui`](tuti-tui) is a terminal client for poking at a running server
+by hand — every RPC above, driven from a single command line.
 
-## Chat wire format
+## Wire format
+
+Requests/responses are [protojson](https://protobuf.dev/programming-guides/proto3/#json)
+encodings of the proto messages: fields are `camelCase`, `int64` fields
+(e.g. `uploadedAtMs`) are JSON strings, `bytes` fields (e.g. `data` on
+`Capture`/`UploadScreenshotRequest`/`SubmitSnapRequest`) are base64, and a
+`oneof` (e.g. `NextStep.step`, `ContentBlock.block`) appears as a plain
+object with exactly one of its variant fields set — e.g.
+`{"nextStep": {"captureSnap": {}}}` or `{"block": {"math": {"expression": "x^2"}}}`.
+Empty-request RPCs (`ListCaptures`, `CreateSession`) accept an empty body.
+
+Example — the Snap & Solve flow end to end:
 
 ```
-POST /v1/chat
-{
-  "message": "I've taken a photo of my math problem, can you help?",
-  "history": [{"role": "user" | "agent", "text": "..."}],
-  "captureId": "cap_xxxxx"   // optional, from a prior /v1/captures upload
-}
-```
+POST /v1/InitializeSnapAndSolve
+{}
+→ {"sessionId": "snap_...", "nextStep": {"captureSnap": {}}}
 
-The response is `Content-Type: text/plain`, flushed chunk-by-chunk as the
-model streams its reply — read the body incrementally and append each chunk,
-mirroring `Agent.sendMessage`'s `Stream<String>` on the Flutter client.
+POST /v1/SubmitSnap
+{"sessionId": "snap_...", "filename": "page.jpg", "data": "<base64>"}
+→ {"nextStep": {"captureSnapResponse": {"options": [...]}}}
+
+POST /v1/SubmitSnapResponse
+{"sessionId": "snap_...", "responseId": "check_work"}
+→ {"nextStep": {"displayAnalysis": {"lessonsToReview": [...], "problemsCaptured": [...]}}}
+```

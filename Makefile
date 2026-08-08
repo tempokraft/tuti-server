@@ -1,4 +1,4 @@
-.PHONY: run build test tidy fmt
+.PHONY: run build test tidy fmt proto
 
 # Run the server locally, loading .env if present.
 run:
@@ -6,6 +6,10 @@ run:
 
 build:
 	go build -o bin/server ./cmd/server
+
+# Regenerate Go bindings from ../tuti/proto/tuti_service.proto.
+proto:
+	@./scripts/gen_proto.sh
 
 test:
 	go test ./...

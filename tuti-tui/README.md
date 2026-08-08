@@ -1,9 +1,9 @@
 # tuti-tui
 
 An interactive terminal client for exercising a running
-[tuti-server](..) instance by hand: chat with the tutoring
-agent, upload and attach captures, and check server health — all from the
-terminal, no `curl` required.
+[tuti-server](..) instance by hand: every `TutiService` RPC (see
+[`tuti/proto/tuti_service.proto`](../../tuti/proto/tuti_service.proto)),
+driven from a single command line — no `curl` required.
 
 ## Running
 
@@ -34,16 +34,37 @@ make fmt     # gofmt -l -w .
 
 ## Using it
 
-- Type a message and press **Enter** to send it; the reply streams in as
-  it's generated.
-- **Ctrl+U** prompts for a local file path and uploads it as a capture.
-  Once uploaded, it's automatically attached to your next message.
-- **Ctrl+L** lists previously uploaded captures — pick one with the arrow
-  keys and **Enter** to attach it instead.
-- **Esc** detaches the currently-attached capture (when at the chat
-  prompt), or cancels an upload/picker prompt.
-- **Ctrl+R** rechecks server health (also shown live in the status bar).
-- **Ctrl+C** quits.
+Type a command and press **Enter**. `help` lists them all; the short
+version:
 
-Conversation history is kept in memory and sent with each request, mirroring
-how the Flutter client drives `POST /v1/chat`.
+```
+health                          recheck server health
+init                            start a Snap & Solve session
+snap <path>                     upload a photo for the current snap session
+respond <check_work|solve|explain>
+                                 submit the student's chosen action
+upload <path>                   upload a screenshot (standalone)
+captures                        list uploaded captures
+session                         create a solve session
+analyze [id1,id2,...]           analyze captures (defaults to the last upload)
+lesson <id> [lang]              fetch lesson content (lang defaults to en)
+clear                           clear the transcript
+quit / ctrl+c                   exit
+```
+
+A typical Snap & Solve run:
+
+```
+init
+snap ./page.jpg
+respond check_work
+```
+
+The status bar tracks context between commands — the current snap session
+id, solve session id, and last uploaded capture id — so `analyze` and
+`respond` work without re-typing ids by hand. Every result is shown as a
+short human-readable summary followed by the full response body (long
+strings, like base64 image bytes, are truncated for readability).
+
+`respond` and `analyze` call out to the server's configured LLM backend and
+can take a while — everything else responds quickly.

@@ -1,67 +1,31 @@
 package httpapi
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"time"
 
-	"tuti-server/internal/storage"
+	tutiv1 "tuti-server/internal/genproto/tutiv1"
 	"tuti-server/internal/tracing"
 )
 
-type captureResponse struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	SizeBytes  int64     `json:"sizeBytes"`
-	UploadedAt time.Time `json:"uploadedAt"`
-	URL        string    `json:"url"`
-}
-
-func toCaptureResponse(obj storage.Object) captureResponse {
-	return captureResponse{
-		ID:         obj.ID,
-		Name:       obj.Name,
-		SizeBytes:  obj.SizeBytes,
-		UploadedAt: obj.UploadedAt,
-		URL:        fmt.Sprintf("/v1/captures/%s/content", obj.ID),
-	}
-}
-
-// handleUploadCapture accepts a multipart/form-data upload with a "file"
-// field and stores it via the configured storage.Store.
-func (s *Server) handleUploadCapture(w http.ResponseWriter, r *http.Request) {
+// handleUploadScreenshot implements TutiService.UploadScreenshot: a
+// protojson body carrying the image bytes directly (base64), rather than
+// multipart/form-data.
+func (s *Server) handleUploadScreenshot(w http.ResponseWriter, r *http.Request) {
 	ctx, span := s.Tracer.StartSpan(r.Context(), "captures.upload")
 	defer span.End()
 
-	r.Body = http.MaxBytesReader(w, r.Body, s.MaxUploadBytes)
-	if err := r.ParseMultipartForm(s.MaxUploadBytes); err != nil {
-		writeJSONError(w, http.StatusRequestEntityTooLarge, "upload too large or malformed")
+	var req tutiv1.UploadScreenshotRequest
+	if err := readProto(w, r, &req, s.MaxUploadBytes); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(req.GetData()) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "data is required")
 		return
 	}
 
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "missing \"file\" field")
-		return
-	}
-	defer file.Close()
-
-	data, err := io.ReadAll(file)
-	if err != nil {
-		span.RecordError(err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to read upload")
-		return
-	}
-
-	contentType := header.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-
-	obj, err := s.Store.Save(ctx, header.Filename, contentType, data)
+	contentType := http.DetectContentType(req.GetData())
+	obj, err := s.Store.Save(ctx, req.GetFilename(), contentType, req.GetData())
 	if err != nil {
 		span.RecordError(err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to store upload")
@@ -69,44 +33,46 @@ func (s *Server) handleUploadCapture(w http.ResponseWriter, r *http.Request) {
 	}
 	span.SetAttributes(tracing.String("capture_id", obj.ID), tracing.Int("size_bytes", int(obj.SizeBytes)))
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(toCaptureResponse(obj))
+	writeProto(w, http.StatusCreated, &tutiv1.UploadScreenshotResponse{
+		Capture: &tutiv1.Capture{
+			Id:           obj.ID,
+			Name:         obj.Name,
+			Data:         req.GetData(),
+			UploadedAtMs: obj.UploadedAt.UnixMilli(),
+		},
+	})
 }
 
-// handleListCaptures returns previously uploaded captures, most recent
-// first.
+// handleListCaptures implements TutiService.ListCaptures. Per the proto,
+// Capture embeds its bytes directly, so each listed capture requires a
+// follow-up Store.Get — acceptable for a local dev/single-instance store,
+// worth revisiting if the capture list ever grows large.
 func (s *Server) handleListCaptures(w http.ResponseWriter, r *http.Request) {
-	objs, err := s.Store.List(r.Context())
+	ctx, span := s.Tracer.StartSpan(r.Context(), "captures.list")
+	defer span.End()
+
+	objs, err := s.Store.List(ctx)
 	if err != nil {
+		span.RecordError(err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to list captures")
 		return
 	}
 
-	resp := make([]captureResponse, len(objs))
-	for i, obj := range objs {
-		resp[i] = toCaptureResponse(obj)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-// handleCaptureContent serves the raw bytes of a previously uploaded
-// capture.
-func (s *Server) handleCaptureContent(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-
-	obj, data, err := s.Store.Get(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			writeJSONError(w, http.StatusNotFound, "capture not found")
+	captures := make([]*tutiv1.Capture, 0, len(objs))
+	for _, obj := range objs {
+		_, data, err := s.Store.Get(ctx, obj.ID)
+		if err != nil {
+			span.RecordError(err)
+			writeJSONError(w, http.StatusInternalServerError, "failed to load capture")
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, "failed to load capture")
-		return
+		captures = append(captures, &tutiv1.Capture{
+			Id:           obj.ID,
+			Name:         obj.Name,
+			Data:         data,
+			UploadedAtMs: obj.UploadedAt.UnixMilli(),
+		})
 	}
 
-	w.Header().Set("Content-Type", obj.ContentType)
-	w.Write(data)
+	writeProto(w, http.StatusOK, &tutiv1.ListCapturesResponse{Captures: captures})
 }
