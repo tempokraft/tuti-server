@@ -80,3 +80,23 @@ func (p *anthropicProvider) callStructured(ctx context.Context, req structuredCa
 	}
 	return nil, fmt.Errorf("analysis: model did not call %s (stop_reason=%s)", req.ToolName, message.StopReason)
 }
+
+func (p *anthropicProvider) callText(ctx context.Context, prompt string, maxTokens int64) (string, error) {
+	message, err := p.client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     p.model,
+		MaxTokens: maxTokens,
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))},
+	})
+	if err != nil {
+		return "", fmt.Errorf("analysis: %w", err)
+	}
+	if message.StopReason == anthropic.StopReasonRefusal {
+		return "", fmt.Errorf("analysis: model declined to respond (refusal)")
+	}
+	for _, block := range message.Content {
+		if tb := block.AsText(); tb.Text != "" {
+			return tb.Text, nil
+		}
+	}
+	return "", fmt.Errorf("analysis: no text in response (stop_reason=%s)", message.StopReason)
+}

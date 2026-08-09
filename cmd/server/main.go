@@ -17,6 +17,7 @@ import (
 	"tuti-server/internal/config"
 	"tuti-server/internal/httpapi"
 	"tuti-server/internal/session"
+	"tuti-server/internal/session/filestore"
 	"tuti-server/internal/storage/localfs"
 	"tuti-server/internal/tracing/slogtracer"
 )
@@ -43,6 +44,7 @@ func run(logger *slog.Logger) error {
 	logger.Info("configuration loaded",
 		"port", cfg.Port,
 		"storage_dir", cfg.StorageDir,
+		"session_dir", cfg.SessionDir,
 		"max_upload_bytes", cfg.MaxUploadBytes,
 		"provider", cfg.AnalysisBackend,
 		"provider_model", cfg.AnalysisModel,
@@ -64,22 +66,51 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	sessionStore, err := filestore.New(cfg.SessionDir)
+	if err != nil {
+		return err
+	}
+	snapStore, err := session.NewSnapStore(sessionStore)
+	if err != nil {
+		return err
+	}
+	solveStore, err := session.NewSolveStore(sessionStore)
+	if err != nil {
+		return err
+	}
+
+	devLogDir := ""
+	if cfg.DevMode {
+		devLogDir = "./data/provider-log"
+	}
+
 	analyzer, err := analysis.New(analysis.Config{
-		Backend: cfg.AnalysisBackend,
-		Model:   cfg.AnalysisModel,
-		APIKey:  apiKey,
+		Backend:     cfg.AnalysisBackend,
+		Model:       cfg.AnalysisModel,
+		APIKey:      apiKey,
+		Logger:      logger,
+		DevLogDir:   devLogDir,
+		ErrorLogDir: "./data/provider-log",
 	})
 	if err != nil {
 		return err
 	}
 
+	prompter, _ := analyzer.(analysis.Prompter)
+
+	if cfg.DevMode {
+		logger.Warn("dev mode enabled — POST /dev/Prompt is open; do not run in production")
+	}
+
 	server := &httpapi.Server{
 		Store:          store,
 		Analyzer:       analyzer,
-		SnapStore:      session.NewSnapStore(),
-		SolveStore:     session.NewSolveStore(),
+		Prompter:       prompter,
+		SnapStore:      snapStore,
+		SolveStore:     solveStore,
 		Tracer:         slogtracer.New(logger),
 		MaxUploadBytes: cfg.MaxUploadBytes,
+		DevMode:        cfg.DevMode,
 	}
 
 	httpServer := &http.Server{

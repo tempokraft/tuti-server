@@ -2,8 +2,8 @@
 
 An interactive terminal client for exercising a running
 [tuti-server](..) instance by hand: every `TutiService` RPC (see
-[`tuti/proto/tuti_service.proto`](../../tuti/proto/tuti_service.proto)),
-driven from a single command line — no `curl` required.
+[`tuti/proto/tuti_service.proto`](../../tuti/proto/tuti_service.proto)) —
+**commands on the left, parameters on the right**, no `curl` required.
 
 ## Running
 
@@ -34,37 +34,38 @@ make fmt     # gofmt -l -w .
 
 ## Using it
 
-Type a command and press **Enter**. `help` lists them all; the short
-version:
+The screen is two panes above a results log:
 
-```
-health                          recheck server health
-init                            start a Snap & Solve session
-snap <path>                     upload a photo for the current snap session
-respond <check_work|solve|explain>
-                                 submit the student's chosen action
-upload <path>                   upload a screenshot (standalone)
-captures                        list uploaded captures
-session                         create a solve session
-analyze [id1,id2,...]           analyze captures (defaults to the last upload)
-lesson <id> [lang]              fetch lesson content (lang defaults to en)
-clear                           clear the transcript
-quit / ctrl+c                   exit
-```
+- **Left — Commands**: every RPC, plus `Clear Log`. `↑`/`↓` to pick one.
+- **Right — Parameters**: the fields the selected command needs (empty for
+  RPCs like `Health Check` or `List Captures`).
 
-A typical Snap & Solve run:
+Press **Enter** on a command with no parameters to run it immediately;
+otherwise Enter moves you into its parameter form.
 
-```
-init
-snap ./page.jpg
-respond check_work
-```
+In the form:
+
+| Key | Does |
+| --- | --- |
+| `Tab` / `Shift+Tab` | move between fields (past the first/last returns to the menu) |
+| `←` / `→` | cycle a choice field (e.g. `Submit Response`'s check_work/solve/explain) |
+| `Ctrl+F` | **browse your machine for a file** — opens a file picker for the focused field (photo parameters only) |
+| `Enter` | on a file field, opens the file picker; otherwise runs the command |
+| `Ctrl+S` | always runs the command, regardless of which field is focused |
+| `Esc` | back to the menu, keeping whatever you've typed |
+
+In the file picker: arrow keys navigate, `Enter` opens a directory or
+selects a file, `Esc` cancels back to the form without changing the field.
+
+A typical Snap & Solve run: select **Init Snap & Solve** and press Enter,
+then **Submit Snap**, `Ctrl+F` to pick a photo from disk, `Ctrl+S` to
+submit, then **Submit Response**, pick an option with `←`/`→`, `Ctrl+S`.
 
 The status bar tracks context between commands — the current snap session
-id, solve session id, and last uploaded capture id — so `analyze` and
-`respond` work without re-typing ids by hand. Every result is shown as a
-short human-readable summary followed by the full response body (long
-strings, like base64 image bytes, are truncated for readability).
+id, solve session id, and last uploaded capture id — so `Analyze Assets`
+and `Submit Response` work without re-typing ids by hand. Every result
+shows a short human-readable summary followed by the full response body
+(long strings, like base64 image bytes, are truncated for readability).
 
-`respond` and `analyze` call out to the server's configured LLM backend and
-can take a while — everything else responds quickly.
+`Submit Response` and `Analyze Assets` call out to the server's configured
+LLM backend and can take a while — everything else responds quickly.

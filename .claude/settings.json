@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 /tmp/pty_drive3.py)",
+      "Bash(sed -i.bak 's/key\\(\"\\\\\\\\x1b\\\\[B\"\\); key\\(\"\\\\\\\\x1b\\\\[B\"\\) # -> Submit Snap\\\\n key\\(\"\\\\\\\\r\"\\) # open form \\(photo value should persist from before\\)/XXX/' /tmp/pty_drive3.py)",
+      "Bash(python3 -)",
+      "Bash(awk '/submit snap form again/,0')",
+      "Bash(python3 /tmp/pty_drive4.py)",
+      "Bash(kill %1 2>/dev/null; sleep 1 *)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

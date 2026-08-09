@@ -24,7 +24,11 @@ func (s *Server) handleUploadScreenshot(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	contentType := http.DetectContentType(req.GetData())
+	contentType, err := detectImageContentType(req.GetData(), req.GetFilename())
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	obj, err := s.Store.Save(ctx, req.GetFilename(), contentType, req.GetData())
 	if err != nil {
 		span.RecordError(err)

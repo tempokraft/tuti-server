@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,9 @@ import (
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+
+	historyMu sync.Mutex
+	history   []HistoryEntry
 }
 
 // New returns a Client pointed at baseURL (e.g. "http://localhost:8080").
@@ -64,24 +68,9 @@ func (c *Client) call(ctx context.Context, rpc string, req, resp any, timeout ti
 		}
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/"+rpc, bytes.NewReader(body))
+	respBody, err := c.do(ctx, http.MethodPost, rpc, "/v1/"+rpc, body)
 	if err != nil {
 		return err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := c.HTTP.Do(httpReq)
-	if err != nil {
-		return err
-	}
-	defer httpResp.Body.Close()
-
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return fmt.Errorf("%s: reading response: %w", rpc, err)
-	}
-	if httpResp.StatusCode >= 300 {
-		return apiError(rpc, httpResp.Status, respBody)
 	}
 	if resp == nil {
 		return nil
@@ -92,6 +81,47 @@ func (c *Client) call(ctx context.Context, rpc string, req, resp any, timeout ti
 	return nil
 }
 
+// do performs one HTTP round trip and records it in the client's request
+// history (see history.go) under label, regardless of outcome. reqBody may
+// be nil (e.g. a GET with no body).
+func (c *Client) do(ctx context.Context, method, label, path string, reqBody []byte) (respBody []byte, err error) {
+	start := time.Now()
+	status := ""
+	defer func() {
+		c.recordHistory(method, label, path, reqBody, respBody, status, time.Since(start), err)
+	}()
+
+	var bodyReader io.Reader
+	if reqBody != nil {
+		bodyReader = bytes.NewReader(reqBody)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+	if reqBody != nil {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
+
+	httpResp, err := c.HTTP.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer httpResp.Body.Close()
+	status = httpResp.Status
+
+	respBody, err = io.ReadAll(httpResp.Body)
+	if err != nil {
+		err = fmt.Errorf("%s: reading response: %w", label, err)
+		return respBody, err
+	}
+	if httpResp.StatusCode >= 300 {
+		err = apiError(label, status, respBody)
+		return respBody, err
+	}
+	return respBody, nil
+}
+
 // shortTimeout bounds RPCs that never call out to an LLM.
 const shortTimeout = 10 * time.Second
 
@@ -100,19 +130,8 @@ func (c *Client) Health() error {
 	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/healthz", nil)
-	if err != nil {
-		return err
-	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("healthz: unexpected status %s", resp.Status)
-	}
-	return nil
+	_, err := c.do(ctx, http.MethodGet, "Health", "/healthz", nil)
+	return err
 }
 
 // UploadScreenshot reads the file at path and uploads it.
@@ -190,6 +209,29 @@ func (c *Client) SubmitSnapResponse(sessionID, responseID string) (*NextStep, er
 		return nil, err
 	}
 	return resp.NextStep, nil
+}
+
+// DevPrompt sends a raw text prompt to the server's active LLM backend and
+// returns the plain-text reply. Requires the server to be running with
+// DEV_MODE=true; returns an error otherwise. No client-side timeout.
+func (c *Client) DevPrompt(prompt string) (string, error) {
+	req := devPromptRequest{Prompt: prompt}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("DevPrompt: encoding request: %w", err)
+	}
+
+	// Dev endpoint lives under /dev/, not /v1/, so we pass an explicit path
+	// rather than using the /v1/-scoped call helper.
+	respBody, err := c.do(context.Background(), http.MethodPost, "DevPrompt", "/dev/Prompt", body)
+	if err != nil {
+		return "", err
+	}
+	var resp devPromptResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return "", fmt.Errorf("DevPrompt: decoding response: %w", err)
+	}
+	return resp.Reply, nil
 }
 
 // GetLessonContent fetches a lesson by id and language ("" defaults to "en"

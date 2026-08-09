@@ -30,14 +30,14 @@ for where an auth middleware should be added later.
 | ------------------------- | --------------------------------------------------------------------- |
 | `internal/genproto/tutiv1` | Generated Go types from the proto — see [Regenerating](#regenerating-the-proto-bindings) |
 | `internal/catalog`        | Static content: lessons, practice problems, topic recommendations, snap options. Ported from the Flutter app's `MockTutiServerClient`. |
-| `internal/analysis`       | The one place a photo is actually sent to Claude: classifying blank-vs-written and extracting/evaluating a problem (forced tool-use, not free text). Everything else (similar problems, lessons to review) is resolved deterministically from `internal/catalog`. |
-| `internal/session`        | In-memory state for the Snap & Solve step flow and solve sessions. |
+| `internal/analysis`       | The one place a photo is actually sent to a vision LLM: classifying blank-vs-written and extracting/evaluating a problem (forced tool-use, not free text). Backend is pluggable — see `ANALYSIS_BACKEND` below. Everything else (similar problems, lessons to review) is resolved deterministically from `internal/catalog`. |
+| `internal/session`        | `Store` interface + `internal/session/filestore` — local disk, in-memory index, for Snap & Solve step-flow and solve-session state. |
 | `internal/storage`        | `Store` interface + `internal/storage/localfs` — local disk, in-memory index, for captures. |
 | `internal/tracing`        | `Tracer` interface + `internal/tracing/slogtracer` — structured logs via `log/slog`. |
 
-To swap storage for S3/GCS or tracing for OpenTelemetry, implement the
-respective interface and wire it in `cmd/server/main.go` — nothing else
-changes.
+To swap session/capture storage for a database or object store, or
+tracing for OpenTelemetry, implement the respective interface and wire it
+in `cmd/server/main.go` — nothing else changes.
 
 ## Running
 

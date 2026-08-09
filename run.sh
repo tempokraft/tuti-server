@@ -22,4 +22,8 @@ if [ -f .env ]; then
 	set +a
 fi
 
-exec go run ./cmd/server
+if [[ -n "${1:-}" ]]; then
+	exec "$1"
+else
+	exec go run ./cmd/server
+fi

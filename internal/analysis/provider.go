@@ -15,6 +15,7 @@ import (
 // reused unchanged across backends.
 type provider interface {
 	callStructured(ctx context.Context, req structuredCallRequest) (json.RawMessage, error)
+	callText(ctx context.Context, prompt string, maxTokens int64) (string, error)
 }
 
 // structuredCallRequest describes one forced structured call: send this

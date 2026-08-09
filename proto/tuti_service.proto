@@ -1,0 +1,443 @@
+syntax = "proto3";
+
+package tuti.v1;
+
+option go_package = "tuti-server/internal/genproto/tutiv1";
+
+// Run scripts/gen_proto.sh to regenerate lib/services/tuti-server/generated/.
+// Run tuti-server/scripts/gen_proto.sh to regenerate tuti-server's Go bindings.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Service
+// ─────────────────────────────────────────────────────────────────────────────
+
+service TutiService {
+  // ── Snap & Solve session flow (server-driven) ───────────────────────────────
+
+  // Start a new Snap & Solve session.  The server assigns a session ID and
+  // returns the first NextStep (always CaptureSnapStep).
+  rpc InitializeSnapAndSolve (InitializeSnapAndSolveRequest)
+      returns (InitializeSnapAndSolveResponse);
+
+  // Submit the captured image.  The server returns the next step — typically
+  // CaptureSnapResponseStep carrying a list of action options for the student.
+  rpc SubmitSnap (SubmitSnapRequest) returns (SubmitSnapResult);
+
+  // Submit the student's chosen option.  The server returns the next step —
+  // typically DisplayAnalysisStep with the full evaluation.
+  rpc SubmitSnapResponse (SubmitSnapResponseRequest)
+      returns (SubmitSnapResponseResult);
+
+  // ── Supporting RPCs ─────────────────────────────────────────────────────────
+
+  // Upload a screenshot; returns the stored Capture record.
+  rpc UploadScreenshot (UploadScreenshotRequest)  returns (UploadScreenshotResponse);
+
+  // Return all previously uploaded captures, most recent first.
+  rpc ListCaptures     (ListCapturesRequest)       returns (ListCapturesResponse);
+
+  // Open a fresh analysis session; returns the session ID for subsequent calls.
+  rpc CreateSession    (CreateSessionRequest)      returns (CreateSessionResponse);
+
+  // Analyse the assets attached to a session; returns problems or topic suggestions.
+  rpc AnalyzeAssets    (AnalyzeAssetsRequest)      returns (AnalyzeAssetsResponse);
+
+  // Return full lesson content for a lesson ID, rendered in the requested language.
+  rpc GetLessonContent (GetLessonContentRequest)   returns (GetLessonContentResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Capture
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Capture {
+  string id              = 1;
+  string name            = 2;
+  bytes  data            = 3;
+  int64  uploaded_at_ms  = 4;  // Unix epoch milliseconds
+  string url             = 5;  // empty = no server URL yet
+}
+
+message UploadScreenshotRequest {
+  bytes  data     = 1;
+  string filename = 2;
+}
+
+message UploadScreenshotResponse {
+  Capture capture = 1;
+}
+
+message ListCapturesRequest {}
+
+message ListCapturesResponse {
+  repeated Capture captures = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session & Analysis
+// ─────────────────────────────────────────────────────────────────────────────
+
+message SolveSession {
+  string          session_id    = 1;
+  repeated string asset_ids     = 2;
+  int64           created_at_ms = 3;
+}
+
+message CreateSessionRequest {}
+
+message CreateSessionResponse {
+  SolveSession session = 1;
+}
+
+message AnalyzeAssetsRequest {
+  string          session_id = 1;
+  repeated string asset_ids  = 2;
+}
+
+// Exactly one of the two variants will be set.
+message AnalyzeAssetsResponse {
+  oneof result {
+    BlankProblemsResult  blank          = 1;
+    ProblemsFoundResult  problems_found = 2;
+  }
+}
+
+message BlankProblemsResult {
+  repeated TopicRecommendation topics           = 1;
+  repeated Problem             similar_problems = 2;
+}
+
+message ProblemsFoundResult {
+  repeated Problem detected_problems = 1;
+  repeated Problem similar_problems  = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Snap & Solve session — server-driven flow
+// ─────────────────────────────────────────────────────────────────────────────
+
+message InitializeSnapAndSolveRequest {}
+
+message InitializeSnapAndSolveResponse {
+  string   session_id = 1;
+  NextStep next_step  = 2;
+}
+
+message SubmitSnapRequest {
+  string session_id = 1;
+  bytes  data       = 2;
+  string filename   = 3;
+}
+
+message SubmitSnapResult {
+  NextStep next_step = 1;
+}
+
+message SubmitSnapResponseRequest {
+  string session_id = 1;
+  string response_id = 2;  // id of the SnapOption the student chose
+}
+
+message SubmitSnapResponseResult {
+  NextStep next_step = 1;
+}
+
+// Discriminated step — exactly one variant is set.
+message NextStep {
+  oneof step {
+    CaptureSnapStep         capture_snap          = 1;
+    CaptureSnapResponseStep capture_snap_response = 2;
+    DisplayAnalysisStep     display_analysis      = 3;
+  }
+}
+
+message CaptureSnapStep {}
+
+message CaptureSnapResponseStep {
+  repeated SnapOption options = 1;
+}
+
+message SnapOption {
+  string id          = 1;
+  string label       = 2;
+  string description = 3;
+  string icon_name   = 4;
+}
+
+message DisplayAnalysisStep {
+  repeated LessonReference  lessons_to_review  = 1;
+  repeated EvaluatedProblem problems_captured  = 2;
+}
+
+message LessonReference {
+  string lesson_id   = 1;
+  string title       = 2;
+  string description = 3;
+  string icon_name   = 4;
+}
+
+message EvaluatedProblem {
+  Problem          problem          = 1;
+  repeated Mistake mistakes         = 2;
+  repeated Problem similar_problems = 3;
+}
+
+message Mistake {
+  string                    id                 = 1;
+  string                    description        = 2;
+  string                    step_reference     = 3;  // empty = not tied to a specific step
+  repeated SocraticQuestion socratic_questions = 4;
+}
+
+message SocraticQuestion {
+  string                 id          = 1;
+  string                 question    = 2;
+  repeated QuestionOption options    = 3;
+  string                 explanation = 4;  // shown after the student answers
+}
+
+message QuestionOption {
+  string id         = 1;
+  string text       = 2;
+  bool   is_correct = 3;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Topics & Problems
+// ─────────────────────────────────────────────────────────────────────────────
+
+message TopicRecommendation {
+  string id          = 1;
+  string title       = 2;
+  string description = 3;
+  string lesson_id   = 4;  // empty = no linked lesson
+  string icon_name   = 5;
+}
+
+enum DifficultyLevel {
+  DIFFICULTY_LEVEL_UNSPECIFIED = 0;
+  DIFFICULTY_LEVEL_EASY        = 1;
+  DIFFICULTY_LEVEL_MEDIUM      = 2;
+  DIFFICULTY_LEVEL_HARD        = 3;
+}
+
+message Problem {
+  string               id         = 1;
+  string               title      = 2;
+  string               topic      = 3;
+  DifficultyLevel      difficulty = 4;
+  repeated ContentBlock statement  = 5;
+  repeated string       hints      = 6;
+  repeated ContentBlock solution   = 7;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Content blocks — discriminated union rendered by ContentRenderer
+// ─────────────────────────────────────────────────────────────────────────────
+
+message ContentBlock {
+  oneof block {
+    TextBlock     text      = 1;
+    MathBlock     math      = 2;
+    Graph2DBlock  graph_2d  = 3;
+    GeometryBlock geometry  = 4;
+    Figure3DBlock figure_3d = 5;
+    StepBlock     step      = 6;
+    HintBlock     hint      = 7;
+  }
+}
+
+message TextBlock {
+  string text      = 1;
+  bool   bold      = 2;
+  bool   italic    = 3;
+  double font_size = 4;  // 0 = unset, use default
+}
+
+message MathBlock {
+  string expression = 1;
+  bool   inline     = 2;
+}
+
+// ── 2-D Graph ─────────────────────────────────────────────────────────────────
+
+message Point2D {
+  double x = 1;
+  double y = 2;
+}
+
+message Series2D {
+  string           label  = 1;
+  string           color  = 2;  // hex "#RRGGBB"
+  repeated Point2D points = 3;
+  bool             dashed = 4;
+}
+
+message AxisConfig {
+  string label = 1;
+  double min   = 2;
+  double max   = 3;
+}
+
+message Graph2DBlock {
+  string            title  = 1;  // empty = no title
+  repeated Series2D series = 2;
+  AxisConfig        x_axis = 3;
+  AxisConfig        y_axis = 4;
+}
+
+// ── 2-D Geometry ──────────────────────────────────────────────────────────────
+
+message ViewBox2D {
+  double x      = 1;
+  double y      = 2;
+  double width  = 3;
+  double height = 4;
+}
+
+message GeoPoint {
+  double x     = 1;
+  double y     = 2;
+  string label = 3;  // empty = no label
+  string color = 4;
+}
+
+message GeoSegment {
+  double x1     = 1;
+  double y1     = 2;
+  double x2     = 3;
+  double y2     = 4;
+  string color  = 5;
+  bool   dashed = 6;
+}
+
+message GeoCircle {
+  double cx     = 1;
+  double cy     = 2;
+  double radius = 3;
+  string color  = 4;
+  bool   filled = 5;
+}
+
+message GeoArc {
+  double cx            = 1;
+  double cy            = 2;
+  double radius        = 3;
+  double start_degrees = 4;
+  double end_degrees   = 5;
+  string color         = 6;
+}
+
+message GeoLabel {
+  double x     = 1;
+  double y     = 2;
+  string text  = 3;
+  string color = 4;
+}
+
+message GeoPolygon {
+  repeated Point2D vertices = 1;
+  string           color    = 2;
+  bool             filled   = 3;
+}
+
+message GeoAngle {
+  double cx            = 1;
+  double cy            = 2;
+  double radius        = 3;
+  double start_degrees = 4;
+  double end_degrees   = 5;
+  string label         = 6;  // empty = no label
+  string color         = 7;
+}
+
+message GeometryElement {
+  oneof element {
+    GeoPoint   point   = 1;
+    GeoSegment segment = 2;
+    GeoCircle  circle  = 3;
+    GeoArc     arc     = 4;
+    GeoLabel   label   = 5;
+    GeoPolygon polygon = 6;
+    GeoAngle   angle   = 7;
+  }
+}
+
+message GeometryBlock {
+  string                   title    = 1;  // empty = no title
+  repeated GeometryElement elements = 2;
+  ViewBox2D                view_box = 3;
+}
+
+// ── 3-D Figure ────────────────────────────────────────────────────────────────
+
+message Vertex3D {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}
+
+message Face3D {
+  repeated int32 indices = 1;
+  string         color   = 2;
+}
+
+message Edge3D {
+  int32 v0 = 1;
+  int32 v1 = 2;
+}
+
+message Camera3D {
+  double elevation = 1;
+  double azimuth   = 2;
+  double distance  = 3;
+}
+
+message Figure3DBlock {
+  repeated Vertex3D vertices = 1;
+  repeated Face3D   faces    = 2;
+  repeated Edge3D   edges    = 3;
+  Camera3D          camera   = 4;
+  string            title    = 5;
+}
+
+// ── Step & Hint ───────────────────────────────────────────────────────────────
+
+message StepBlock {
+  int32                step_number = 1;
+  string               label       = 2;
+  repeated ContentBlock content     = 3;
+}
+
+message HintBlock {
+  string hint = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lesson
+// ─────────────────────────────────────────────────────────────────────────────
+
+message LessonSection {
+  string                heading = 1;
+  repeated ContentBlock content = 2;
+}
+
+message LessonContent {
+  string                id             = 1;
+  string                title          = 2;
+  string                topic          = 3;
+  string                icon_name      = 4;
+  string                language       = 5;
+  repeated ContentBlock  context        = 6;
+  repeated LessonSection sections       = 7;
+  LessonSection          worked_example = 8;
+}
+
+message GetLessonContentRequest {
+  string lesson_id = 1;
+  string language  = 2;
+}
+
+message GetLessonContentResponse {
+  LessonContent content = 1;
+}

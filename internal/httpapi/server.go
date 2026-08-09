@@ -22,10 +22,12 @@ import (
 type Server struct {
 	Store          storage.Store
 	Analyzer       analysis.Analyzer
+	Prompter       analysis.Prompter
 	SnapStore      *session.SnapStore
 	SolveStore     *session.SolveStore
 	Tracer         tracing.Tracer
 	MaxUploadBytes int64
+	DevMode        bool
 }
 
 // Routes builds the HTTP handler for the server.
@@ -51,6 +53,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/AnalyzeAssets", s.handleAnalyzeAssets)
 
 	mux.HandleFunc("POST /v1/GetLessonContent", s.handleGetLessonContent)
+
+	if s.DevMode {
+		mux.HandleFunc("POST /dev/Prompt", s.handleDevPrompt)
+	}
 
 	return withMiddleware(mux, s.Tracer)
 }

@@ -1,4 +1,4 @@
-.PHONY: run build test tidy fmt
+.PHONY: run build dev test tidy fmt
 
 # Run the TUI against a local tuti-server (override with SERVER=...).
 SERVER ?= http://localhost:8080
@@ -8,6 +8,10 @@ run:
 
 build:
 	go build -o bin/tuti-tui ./cmd/tuti-tui
+
+# Build then run the compiled binary.
+dev: build
+	./bin/tuti-tui -server $(SERVER)
 
 test:
 	go test ./...

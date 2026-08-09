@@ -102,3 +102,39 @@ func (p *openaiProvider) callStructured(ctx context.Context, req structuredCallR
 	}
 	return nil, fmt.Errorf("analysis: model did not call %s (status=%s)", req.ToolName, resp.Status)
 }
+
+func (p *openaiProvider) callText(ctx context.Context, prompt string, maxTokens int64) (string, error) {
+	resp, err := p.client.Responses.New(ctx, responses.ResponseNewParams{
+		Model:           p.model,
+		MaxOutputTokens: openai.Int(maxTokens),
+		Input: responses.ResponseNewParamsInputUnion{
+			OfInputItemList: responses.ResponseInputParam{
+				{OfMessage: &responses.EasyInputMessageParam{
+					Role: responses.EasyInputMessageRoleUser,
+					Content: responses.EasyInputMessageContentUnionParam{
+						OfInputItemContentList: responses.ResponseInputMessageContentListParam{
+							responses.ResponseInputContentParamOfInputText(prompt),
+						},
+					},
+				}},
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("analysis: %w", err)
+	}
+	for _, item := range resp.Output {
+		if item.Type != "message" {
+			continue
+		}
+		for _, c := range item.AsMessage().Content {
+			if c.Type == "output_text" {
+				return c.AsOutputText().Text, nil
+			}
+		}
+	}
+	if resp.Error.Message != "" {
+		return "", fmt.Errorf("analysis: %s", resp.Error.Message)
+	}
+	return "", fmt.Errorf("analysis: no text in response (status=%s)", resp.Status)
+}

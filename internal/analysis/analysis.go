@@ -16,6 +16,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"time"
 
 	tutiv1 "tuti-server/internal/genproto/tutiv1"
 )
@@ -37,6 +39,12 @@ type ExtractResult struct {
 type EvaluateResult struct {
 	Problem  *tutiv1.Problem
 	Mistakes []*tutiv1.Mistake
+}
+
+// Prompter sends a raw text prompt to the active backend and returns the
+// model's plain-text reply. Intended for dev/debugging use only.
+type Prompter interface {
+	RawPrompt(ctx context.Context, text string) (string, error)
 }
 
 // Analyzer is the narrow, vision-backed judgment call this package exists
@@ -70,6 +78,16 @@ type Config struct {
 	// (environment variable or CLI-managed profile) when non-empty.
 	// Usually left empty in favor of that resolution.
 	APIKey string
+	// Logger receives a structured log line for every provider call
+	// (op, prompt length, latency, outcome). nil = no logging.
+	Logger *slog.Logger
+	// DevLogDir, when non-empty, causes one JSON file to be written per
+	// provider call containing the full request and response.
+	DevLogDir string
+	// ErrorLogDir, when non-empty, causes one JSON file to be written for
+	// every failed provider call. Active regardless of DevLogDir so errors
+	// are always capturable in production.
+	ErrorLogDir string
 }
 
 // New builds an Analyzer backed by the provider named in cfg.Backend.
@@ -83,14 +101,38 @@ func New(cfg Config) (Analyzer, error) {
 	default:
 		return nil, fmt.Errorf("analysis: unknown backend %q", cfg.Backend)
 	}
-	return &llmAnalyzer{backend: backend}, nil
+	return &llmAnalyzer{backend: backend, logger: cfg.Logger, devLogDir: cfg.DevLogDir, errorLogDir: cfg.ErrorLogDir}, nil
 }
 
 // llmAnalyzer implements Analyzer against whichever provider it was built
 // with. All prompt text, schema shape, and output validation are shared
 // across every backend — only the network call in provider differs.
 type llmAnalyzer struct {
-	backend provider
+	backend     provider
+	logger      *slog.Logger
+	devLogDir   string
+	errorLogDir string
+}
+
+func (a *llmAnalyzer) RawPrompt(ctx context.Context, text string) (string, error) {
+	start := time.Now()
+	reply, err := a.backend.callText(ctx, text, defaultMaxTokens)
+	latency := time.Since(start)
+
+	a.logCall("text", "", 0, len(text), latency, err)
+
+	var respRaw json.RawMessage
+	if err == nil {
+		respRaw, _ = json.Marshal(reply)
+	}
+	logReq := textLogReq{Prompt: text, MaxTokens: defaultMaxTokens}
+	if a.devLogDir != "" {
+		writeDevLog(a.devLogDir, "text", logReq, respRaw, err, latency)
+	} else if err != nil && a.errorLogDir != "" {
+		writeDevLog(a.errorLogDir, "text", logReq, respRaw, err, latency)
+	}
+
+	return reply, err
 }
 
 func (a *llmAnalyzer) Extract(ctx context.Context, images []Image) (ExtractResult, error) {
@@ -136,7 +178,7 @@ func (a *llmAnalyzer) Evaluate(ctx context.Context, images []Image) (EvaluateRes
 // the result beyond decoding it — every backend-specific detail (how to
 // force the call, how to read the answer back out) lives in provider.
 func (a *llmAnalyzer) call(ctx context.Context, images []Image, prompt, toolName, description string, properties map[string]any, required []string, out any) error {
-	raw, err := a.backend.callStructured(ctx, structuredCallRequest{
+	req := structuredCallRequest{
 		System:      systemPrompt,
 		Prompt:      prompt,
 		Images:      images,
@@ -145,7 +187,27 @@ func (a *llmAnalyzer) call(ctx context.Context, images []Image, prompt, toolName
 		Properties:  properties,
 		Required:    required,
 		MaxTokens:   defaultMaxTokens,
-	})
+	}
+
+	start := time.Now()
+	raw, err := a.backend.callStructured(ctx, req)
+	latency := time.Since(start)
+
+	a.logCall("structured", toolName, len(images), len(prompt), latency, err)
+
+	logReq := structuredLogReq{
+		System:     req.System,
+		Prompt:     req.Prompt,
+		ToolName:   req.ToolName,
+		ImageCount: len(req.Images),
+		MaxTokens:  req.MaxTokens,
+	}
+	if a.devLogDir != "" {
+		writeDevLog(a.devLogDir, "structured", logReq, raw, err, latency)
+	} else if err != nil && a.errorLogDir != "" {
+		writeDevLog(a.errorLogDir, "structured", logReq, raw, err, latency)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -153,4 +215,26 @@ func (a *llmAnalyzer) call(ctx context.Context, images []Image, prompt, toolName
 		return fmt.Errorf("analysis: decoding %s output: %w", toolName, err)
 	}
 	return nil
+}
+
+func (a *llmAnalyzer) logCall(op, tool string, images, promptLen int, latency time.Duration, err error) {
+	if a.logger == nil {
+		return
+	}
+	attrs := []any{
+		"op", op,
+		"prompt_len", promptLen,
+		"latency_ms", latency.Milliseconds(),
+		"ok", err == nil,
+	}
+	if tool != "" {
+		attrs = append(attrs, "tool", tool)
+	}
+	if images > 0 {
+		attrs = append(attrs, "images", images)
+	}
+	if err != nil {
+		attrs = append(attrs, "error", err.Error())
+	}
+	a.logger.Info("provider.call", attrs...)
 }

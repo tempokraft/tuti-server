@@ -40,6 +40,10 @@ type Config struct {
 
 	// MaxUploadBytes caps the size of a single capture upload.
 	MaxUploadBytes int64
+
+	// DevMode enables development-only endpoints (e.g. POST /dev/Prompt).
+	// Set DEV_MODE=true in the environment; never enable in production.
+	DevMode bool
 }
 
 const (
@@ -65,11 +69,13 @@ func Load() Config {
 	return Config{
 		Port:            getEnv("PORT", defaultPort),
 		StorageDir:      getEnv("STORAGE_DIR", defaultStorageDir),
+		SessionDir:      getEnv("SESSION_DIR", defaultSessionDir),
 		AnalysisBackend: backend,
 		AnalysisModel:   getEnv("ANALYSIS_MODEL", defaultModel),
 		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
 		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
 		MaxUploadBytes:  getEnvInt64("MAX_UPLOAD_BYTES", defaultMaxUploadBytes),
+		DevMode:         getEnvBool("DEV_MODE"),
 	}
 }
 
@@ -78,6 +84,11 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getEnvBool(key string) bool {
+	v := os.Getenv(key)
+	return v == "true" || v == "1"
 }
 
 func getEnvInt64(key string, fallback int64) int64 {

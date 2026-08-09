@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -14,12 +16,12 @@ import (
 type healthResultMsg struct{ err error }
 
 type resultMsg struct {
-	// title is echoed to the transcript before the result (or error).
+	// title is echoed to the log before the result (or error).
 	title string
 	err   error
-	// summary is an optional human-readable line shown above the raw
-	// JSON dump — used for NextStep results, where "here's what happens
-	// next" matters more than the wire shape.
+	// summary is a human-readable line shown above the raw JSON dump —
+	// used for NextStep results, where "here's what happens next" matters
+	// more than the wire shape.
 	summary string
 	body    any // marshaled via api.Pretty when non-nil
 
@@ -34,51 +36,53 @@ func checkHealth(c *api.Client) tea.Cmd {
 	return func() tea.Msg { return healthResultMsg{err: c.Health()} }
 }
 
-// ── dispatch ─────────────────────────────────────────────────────────────
-
-const helpText = `Commands:
-  health                         recheck server health
-  init                           start a Snap & Solve session
-  snap <path>                    upload a photo for the current snap session
-  respond <check_work|solve|explain>
-                                  submit the student's chosen action
-  upload <path>                  upload a screenshot (standalone, not the snap flow)
-  captures                       list uploaded captures
-  session                        create a solve session
-  analyze [id1,id2,...]          analyze captures (defaults to the last upload)
-  lesson <id> [lang]             fetch lesson content (lang defaults to en)
-  clear                          clear the transcript
-  help                           show this message
-  quit / ctrl+c                  exit
-
-Context carried between commands: snap session (from 'init'), solve session
-(from 'session'), and last uploaded capture id — shown in the status bar.`
-
-// dispatch parses a command line and returns the tea.Cmd that runs it, or
-// nil plus a message to show immediately (help/clear/unknown/quit) when no
-// network call is needed.
-func (m Model) dispatch(line string) (tea.Cmd, *resultMsg, bool /* quit */) {
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return nil, nil, false
+// replayCmd resends entry's original request byte-for-byte via
+// api.Client.Replay and renders the raw response the same way any other
+// command result is shown.
+func replayCmd(c *api.Client, entry api.HistoryEntry) tea.Cmd {
+	title := "replay: " + entry.RPC
+	return func() tea.Msg {
+		respBody, err := c.Replay(context.Background(), entry)
+		if err != nil {
+			return resultMsg{title: title, err: err}
+		}
+		var body any
+		if len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, &body); err != nil {
+				body = string(respBody)
+			}
+		}
+		return resultMsg{title: title, body: body, summary: "replayed " + entry.RPC}
 	}
-	cmd, args := strings.ToLower(fields[0]), fields[1:]
+}
 
-	switch cmd {
-	case "quit", "exit":
-		return nil, nil, true
+// ── run ──────────────────────────────────────────────────────────────────
 
-	case "help", "?":
-		return nil, &resultMsg{title: "help", body: nil, summary: helpText}, false
+// fieldValue returns the value of the field named name, or "" if the
+// selected command has no such field.
+func (m Model) fieldValue(name string) string {
+	for _, f := range m.fields {
+		if f.spec.Name == name {
+			return f.Value()
+		}
+	}
+	return ""
+}
 
+// run builds the tea.Cmd for the currently selected command using its
+// form field values, or — for validation failures and local utilities —
+// an immediate *resultMsg that doesn't need a network round trip.
+func (m Model) run() (tea.Cmd, *resultMsg) {
+	c := m.selectedCommand()
+
+	switch c.ID {
 	case "clear":
-		return nil, &resultMsg{title: "__clear__"}, false
+		return nil, &resultMsg{title: "__clear__"}
 
 	case "health":
 		return func() tea.Msg {
-			err := m.client.Health()
-			return resultMsg{title: "health", err: err, summary: "ok"}
-		}, nil, false
+			return resultMsg{title: "health", err: m.client.Health(), summary: "ok"}
+		}, nil
 
 	case "init":
 		return func() tea.Msg {
@@ -86,46 +90,53 @@ func (m Model) dispatch(line string) (tea.Cmd, *resultMsg, bool /* quit */) {
 			if err != nil {
 				return resultMsg{title: "init", err: err}
 			}
-			return resultMsg{title: "init", body: next, summary: summarizeNextStep(next), setSnapSessionID: id}
-		}, nil, false
+			return resultMsg{
+				title: "init",
+				body: struct {
+					SessionID string        `json:"sessionId"`
+					NextStep  *api.NextStep `json:"nextStep"`
+				}{SessionID: id, NextStep: next},
+				summary:          "session: " + id + " — " + summarizeNextStep(next),
+				setSnapSessionID: id,
+			}
+		}, nil
 
 	case "snap":
-		if len(args) < 1 {
-			return nil, &resultMsg{title: "snap", err: fmt.Errorf("usage: snap <path>")}, false
+		path := m.fieldValue("Photo")
+		if path == "" {
+			return nil, &resultMsg{title: "snap", err: fmt.Errorf("Photo is required (Ctrl+F to browse)")}
 		}
 		if m.snapSessionID == "" {
-			return nil, &resultMsg{title: "snap", err: fmt.Errorf("no snap session — run 'init' first")}, false
+			return nil, &resultMsg{title: "snap", err: fmt.Errorf("no snap session — run 'Init Snap & Solve' first")}
 		}
-		path, sessionID := args[0], m.snapSessionID
+		sessionID := m.snapSessionID
 		return func() tea.Msg {
 			next, err := m.client.SubmitSnap(sessionID, path)
 			if err != nil {
 				return resultMsg{title: "snap", err: err}
 			}
 			return resultMsg{title: "snap", body: next, summary: summarizeNextStep(next)}
-		}, nil, false
+		}, nil
 
 	case "respond":
-		if len(args) < 1 {
-			return nil, &resultMsg{title: "respond", err: fmt.Errorf("usage: respond <check_work|solve|explain>")}, false
-		}
+		responseID := m.fieldValue("Response")
 		if m.snapSessionID == "" {
-			return nil, &resultMsg{title: "respond", err: fmt.Errorf("no snap session — run 'init' first")}, false
+			return nil, &resultMsg{title: "respond", err: fmt.Errorf("no snap session — run 'Init Snap & Solve' first")}
 		}
-		responseID, sessionID := args[0], m.snapSessionID
+		sessionID := m.snapSessionID
 		return func() tea.Msg {
 			next, err := m.client.SubmitSnapResponse(sessionID, responseID)
 			if err != nil {
 				return resultMsg{title: "respond", err: err}
 			}
 			return resultMsg{title: "respond", body: next, summary: summarizeNextStep(next)}
-		}, nil, false
+		}, nil
 
 	case "upload":
-		if len(args) < 1 {
-			return nil, &resultMsg{title: "upload", err: fmt.Errorf("usage: upload <path>")}, false
+		path := m.fieldValue("Photo")
+		if path == "" {
+			return nil, &resultMsg{title: "upload", err: fmt.Errorf("Photo is required (Ctrl+F to browse)")}
 		}
-		path := args[0]
 		return func() tea.Msg {
 			capture, err := m.client.UploadScreenshot(path)
 			if err != nil {
@@ -136,7 +147,7 @@ func (m Model) dispatch(line string) (tea.Cmd, *resultMsg, bool /* quit */) {
 				id = capture.ID
 			}
 			return resultMsg{title: "upload", body: capture, summary: "capture id: " + id, setLastCaptureID: id}
-		}, nil, false
+		}, nil
 
 	case "captures":
 		return func() tea.Msg {
@@ -145,7 +156,7 @@ func (m Model) dispatch(line string) (tea.Cmd, *resultMsg, bool /* quit */) {
 				return resultMsg{title: "captures", err: err}
 			}
 			return resultMsg{title: "captures", body: captures, summary: fmt.Sprintf("%d capture(s)", len(captures))}
-		}, nil, false
+		}, nil
 
 	case "session":
 		return func() tea.Msg {
@@ -158,22 +169,25 @@ func (m Model) dispatch(line string) (tea.Cmd, *resultMsg, bool /* quit */) {
 				id = sess.SessionID
 			}
 			return resultMsg{title: "session", body: sess, summary: "session id: " + id, setSolveSessionID: id}
-		}, nil, false
+		}, nil
 
 	case "analyze":
-		assetIDs := args
-		if len(assetIDs) == 0 && m.lastCaptureID != "" {
+		raw := strings.TrimSpace(m.fieldValue("Asset IDs"))
+		var assetIDs []string
+		if raw != "" {
+			for _, id := range strings.Split(raw, ",") {
+				if id = strings.TrimSpace(id); id != "" {
+					assetIDs = append(assetIDs, id)
+				}
+			}
+		} else if m.lastCaptureID != "" {
 			assetIDs = []string{m.lastCaptureID}
 		}
 		if len(assetIDs) == 0 {
-			return nil, &resultMsg{title: "analyze", err: fmt.Errorf("usage: analyze <id1,id2,...> (or upload something first)")}, false
+			return nil, &resultMsg{title: "analyze", err: fmt.Errorf("Asset IDs is required (or upload something first)")}
 		}
 		if m.solveSessionID == "" {
-			return nil, &resultMsg{title: "analyze", err: fmt.Errorf("no solve session — run 'session' first")}, false
-		}
-		// allow comma-separated ids in a single arg too
-		if len(assetIDs) == 1 {
-			assetIDs = strings.Split(assetIDs[0], ",")
+			return nil, &resultMsg{title: "analyze", err: fmt.Errorf("no solve session — run 'Create Session' first")}
 		}
 		sessionID := m.solveSessionID
 		return func() tea.Msg {
@@ -182,17 +196,14 @@ func (m Model) dispatch(line string) (tea.Cmd, *resultMsg, bool /* quit */) {
 				return resultMsg{title: "analyze", err: err}
 			}
 			return resultMsg{title: "analyze", body: result, summary: summarizeAnalysis(result)}
-		}, nil, false
+		}, nil
 
 	case "lesson":
-		if len(args) < 1 {
-			return nil, &resultMsg{title: "lesson", err: fmt.Errorf("usage: lesson <id> [lang]")}, false
+		lessonID := m.fieldValue("Lesson ID")
+		if lessonID == "" {
+			return nil, &resultMsg{title: "lesson", err: fmt.Errorf("Lesson ID is required")}
 		}
-		lessonID := args[0]
-		lang := ""
-		if len(args) > 1 {
-			lang = args[1]
-		}
+		lang := m.fieldValue("Language")
 		return func() tea.Msg {
 			content, err := m.client.GetLessonContent(lessonID, lang)
 			if err != nil {
@@ -203,10 +214,23 @@ func (m Model) dispatch(line string) (tea.Cmd, *resultMsg, bool /* quit */) {
 				title = content.Title
 			}
 			return resultMsg{title: "lesson", body: content, summary: title}
-		}, nil, false
+		}, nil
+
+	case "devprompt":
+		prompt := m.fieldValue("Prompt")
+		if prompt == "" {
+			return nil, &resultMsg{title: "devprompt", err: fmt.Errorf("Prompt is required")}
+		}
+		return func() tea.Msg {
+			reply, err := m.client.DevPrompt(prompt)
+			if err != nil {
+				return resultMsg{title: "devprompt", err: err}
+			}
+			return resultMsg{title: "devprompt", body: reply, summary: fmt.Sprintf("%d chars", len(reply))}
+		}, nil
 
 	default:
-		return nil, &resultMsg{title: cmd, err: fmt.Errorf("unknown command %q — try 'help'", cmd)}, false
+		return nil, &resultMsg{title: c.ID, err: fmt.Errorf("unknown command %q", c.ID)}
 	}
 }
 

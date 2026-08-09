@@ -243,3 +243,11 @@ type getLessonContentRequest struct {
 type getLessonContentResponse struct {
 	Content *LessonContent `json:"content,omitempty"`
 }
+
+type devPromptRequest struct {
+	Prompt string `json:"prompt"`
+}
+
+type devPromptResponse struct {
+	Reply string `json:"reply"`
+}
